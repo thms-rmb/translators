@@ -9,7 +9,7 @@
 	"inRepository": true,
 	"translatorType": 4,
 	"browserSupport": "gcsibv",
-	"lastUpdated": "2021-07-31 00:43:21"
+	"lastUpdated": "2025-01-28 12:08:54"
 }
 
 /*
@@ -68,39 +68,127 @@ function getSearchResults(doc, checkOnly) {
 	return found ? items : false;
 }
 
-function doWeb(doc, url) {
+async function doWeb(doc, url) {
 	if (detectWeb(doc, url) == "multiple") {
-		Zotero.selectItems(getSearchResults(doc, false), function (items) {
-			if (items) ZU.processDocuments(Object.keys(items), scrape);
-		});
+		const selectedItems = await Z.selectItems(getSearchResults(doc, false));
+		if (selectedItems) {
+			const promises = Object.keys(selectedItems).map(async (url) => {
+				const requestedDoc = await ZU.requestDocument(url);
+				return scrape(requestedDoc, url);
+			});
+
+			await Promise.all(promises);
+		}
 	}
 	else {
-		scrape(doc, url);
+		await scrape(doc, url);
 	}
 }
 
-function scrape(doc, _url) {
-	let marcXMLURL = attr(doc, 'a[href$="/export/xm"], a[download$=".xml"]', 'href');
-	ZU.doGet(marcXMLURL, function (respText) {
-		var translator = Zotero.loadTranslator("import");
-		// MARCXML
-		translator.setTranslator("edd87d07-9194-42f8-b2ad-997c4c7deefd");
-		translator.setString(respText);
-		
-		translator.setHandler("itemDone", function (obj, item) {
-			item.libraryCatalog = text(doc, '#headerlogo')
-				|| attr(doc, 'meta[property="og:site_name"]', 'content');
-			
-			let erURL = attr(doc, '.er-link', 'href');
-			if (erURL) {
-				item.url = erURL;
-			}
-			
-			item.complete();
-		});
-		
-		translator.translate();
+async function scrape(doc, _url) {
+	let marcXMLURL = attr(doc, 'a[href$="/export/xm"], a[download$=".xml"]', "href");
+	if (!marcXMLURL) {
+		marcXMLURL = attr(doc, 'form[action$="/export/xm"]', "action");
+	}
+
+	const [marcXML, fileInformation] = await Promise.all([
+		ZU.requestText(marcXMLURL),
+		getFileInformation(doc),
+	]);
+
+	const translator = Zotero.loadTranslator("import");
+	// MARCXML
+	translator.setTranslator("edd87d07-9194-42f8-b2ad-997c4c7deefd");
+	translator.setString(marcXML);
+
+	translator.setHandler("itemDone", function (obj, item) {
+		item.libraryCatalog = text(doc, '#headerlogo')
+			|| attr(doc, 'meta[property="og:site_name"]', 'content');
+
+		const openGraphUrl = getOpenGraphUrl(doc);
+		if (openGraphUrl) {
+			item.url = openGraphUrl;
+		}
+
+		if (fileInformation) {
+			enrichItemWithAttachments(item, fileInformation);
+		}
+		item.complete();
 	});
+
+	await translator.translate();
+}
+
+/**
+ * @param {Document} doc The page document
+ * @returns {?Promise<Array<Object>>} The file information object
+ */
+async function getFileInformation(doc) {
+	const fileApiArgsElement = doc.getElementById("detailed-file-api-args");
+
+	if (fileApiArgsElement === null) {
+		return null;
+	}
+
+	let fileApiArgs;
+
+	try {
+		fileApiArgs = JSON.parse(fileApiArgsElement.innerText);
+	}
+	catch (error) {
+		return null;
+	}
+
+	const urlParams = new URLSearchParams(Object.entries({
+		"recid": fileApiArgs.recid,
+		"file_types": fileApiArgs.file_types,
+		"hidden_types": fileApiArgs.hidden_types,
+		"ln": fileApiArgs.ln,
+		"hr": fileApiArgs.hr,
+		"hide_transcripts": fileApiArgs.hide_transcripts,
+	}));
+
+	let fileInformation;
+	try {
+		fileInformation = await ZU.requestJSON(`/api/v1/file?${urlParams}`);
+	}
+	catch (error) {
+		return null;
+	}
+
+	return fileInformation;
+}
+
+/**
+ * @param {Z.Item} item The Zotero item
+ * @param {Array<Object>} fileInformation The file information
+ */
+function enrichItemWithAttachments(item, fileInformation) {
+	for (const file of fileInformation) {
+		if (file.restricted) {
+			continue;
+		}
+
+		item.attachments.push({
+			title: file.name + file.format,
+			mimeType: file.mime,
+			url: file.url,
+		});
+	}
+}
+
+/**
+ * @param {Document} doc The page document
+ * @returns {?string} The page url
+ */
+function getOpenGraphUrl(doc) {
+	const openGraphUrlElement = doc.querySelector('meta[property="og:url"]')
+
+	if (openGraphUrlElement === null) {
+		return null;
+	}
+
+	return openGraphUrlElement.getAttribute("content");
 }
 
 /** BEGIN TEST CASES **/
